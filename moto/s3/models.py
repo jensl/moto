@@ -1594,32 +1594,68 @@ class S3Backend(BaseBackend, CloudWatchMetricProvider):
         return self.get_bucket(bucket_name).encryption
 
     def list_object_versions(
-        self, bucket_name, delimiter=None, key_marker=None, prefix=""
+        self, bucket_name, delimiter=None, key_marker=None, prefix="", max_keys=None
     ):
         bucket = self.get_bucket(bucket_name)
+
+        class Version:
+            def __init__(self, source):
+                self.name = source.name
+                self.version_id = source.version_id
+                self.last_modified_ISO8601 = source.last_modified_ISO8601
+                self.is_latest = False
+
+                if isinstance(source, FakeKey):
+                    self.etag = source.etag
+                    self.size = source.size
+                    self.storage_class = source.storage_class
+
+        def include_key(name):
+            # skip all keys that alphabetically come before keymarker
+            if key_marker and name < key_marker:
+                return False
+            # Filter for keys that start with prefix
+            if not name.startswith(prefix):
+                return False
+            return True
 
         common_prefixes = []
         requested_versions = []
         delete_markers = []
-        all_versions = itertools.chain(
-            *(copy.deepcopy(l) for key, l in bucket.keys.iterlists())
+        keys = sorted((key for key in bucket.keys.keys() if include_key(key)))
+        if max_keys:
+            keys = keys[:max_keys]
+        all_versions = itertools.chain.from_iterable(
+            (
+                [
+                    Version(v)
+                    for v in sorted(
+                        bucket.keys.getlist(key),
+                        key=lambda r: unix_time_millis(r.last_modified),
+                        reverse=True,
+                    )
+                ]
+                for key in keys
+            )
         )
         all_versions = list(all_versions)
-        # sort by name, revert last-modified-date
-        all_versions.sort(key=lambda r: (r.name, -unix_time_millis(r.last_modified)))
+
         last_name = None
+        number_of_keys = 0
+        is_truncated = False
+
         for version in all_versions:
             name = version.name
+
             # guaranteed to be sorted - so the first key with this name will be the latest
             version.is_latest = name != last_name
             if version.is_latest:
                 last_name = name
-            # skip all keys that alphabetically come before keymarker
-            if key_marker and name < key_marker:
-                continue
-            # Filter for keys that start with prefix
-            if not name.startswith(prefix):
-                continue
+                number_of_keys += 1
+                if max_keys and number_of_keys > max_keys:
+                    is_truncated = True
+                    break
+
             # separate keys that contain the same string between the prefix and the first occurrence of the delimiter
             if delimiter and delimiter in name[len(prefix) :]:
                 end_of_delimiter = (
@@ -1638,7 +1674,7 @@ class S3Backend(BaseBackend, CloudWatchMetricProvider):
 
         common_prefixes = sorted(set(common_prefixes))
 
-        return requested_versions, common_prefixes, delete_markers
+        return requested_versions, common_prefixes, delete_markers, is_truncated
 
     def get_bucket_policy(self, bucket_name):
         return self.get_bucket(bucket_name).policy
