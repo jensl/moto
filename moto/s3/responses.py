@@ -502,14 +502,20 @@ class S3Response(BaseResponse):
             delimiter = querystring.get("delimiter", [None])[0]
             key_marker = querystring.get("key-marker", [None])[0]
             prefix = querystring.get("prefix", [""])[0]
+            max_keys = int(querystring.get("max-keys", [1000])[0])
 
             bucket = self.backend.get_bucket(bucket_name)
             (
                 versions,
                 common_prefixes,
                 delete_markers,
+                is_truncated,
             ) = self.backend.list_object_versions(
-                bucket_name, delimiter=delimiter, key_marker=key_marker, prefix=prefix
+                bucket_name,
+                delimiter=delimiter,
+                key_marker=key_marker,
+                prefix=prefix,
+                max_keys=max_keys,
             )
             key_list = versions
             template = self.response_template(S3_BUCKET_GET_VERSIONS)
@@ -523,10 +529,10 @@ class S3Response(BaseResponse):
                     delete_marker_list=delete_markers,
                     bucket=bucket,
                     prefix=prefix,
-                    max_keys=1000,
+                    max_keys=max_keys,
                     delimiter=delimiter,
                     key_marker=key_marker,
-                    is_truncated="false",
+                    is_truncated="true" if is_truncated else "false",
                 ),
             )
         elif "encryption" in querystring:
